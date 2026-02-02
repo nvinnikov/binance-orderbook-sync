@@ -40,30 +40,47 @@ class DepthUpdateData(BaseModel):
 
 # REST Snapshot
 
+
 def get_snapshot(url: str, symbol: str, size: int = 1000) -> SnapshotResponse | None:
+    # Binance Futures API limit: 5..1000
+    if size > 1000:
+        size = 1000
+    elif size < 5:
+        size = 5
+
+    params = {"symbol": symbol.upper(), "limit": size}
+
     try:
-        # Binance Futures API limit: 5..1000
-        if size > 1000:
-            print(f"Лимит {size} слишком большой, используем максимум 1000")
-            size = 1000
-        elif size < 5:
-            print(f"Лимит {size} слишком маленький, используем минимум 5")
-            size = 5
+        resp = requests.get(url, params=params, timeout=10)
+        if resp.status_code != 200:
+            print(f"Snapshot HTTP {resp.status_code}")
+            print(f"Body: {resp.text[:300]}")
+            return None
 
-        params = {"symbol": symbol.upper(), "limit": size}
-        resp = requests.get(url, params=params, timeout=5)
-        resp.raise_for_status()
+        return SnapshotResponse(**resp.json())
 
-        snapshot = SnapshotResponse(**resp.json())
-        return snapshot
-    except requests.HTTPError as e:
-        print(f"Snapshot fetch failed: HTTP {e.response.status_code if e.response else 'unknown'}")
+    except requests.exceptions.Timeout:
+        print("Snapshot error: Timeout")
         return None
+
+    except requests.exceptions.SSLError as e:
+        print(f"Snapshot error: SSLError: {e}")
+        return None
+
+    except requests.exceptions.ConnectionError as e:
+        print(f"Snapshot error: ConnectionError: {e}")
+        return None
+
+    except requests.exceptions.RequestException as e:
+        print(f"Snapshot error: RequestException: {type(e).__name__}: {e}")
+        return None
+
     except ValidationError as e:
         print(f"Snapshot validation error: {e}")
         return None
+
     except Exception as e:
-        print(f"Snapshot fetch error: {type(e).__name__}: {e}")
+        print(f"Snapshot unexpected error: {type(e).__name__}: {e}")
         return None
 
 
