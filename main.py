@@ -73,7 +73,17 @@ def init_order_book(snapshot: SnapshotResponse) -> Dict[str, Dict[float, float]]
 def extract_depth_payload(msg: Dict[str, Any]) -> Dict[str, Any]:
     return msg.get("data", msg)
 
+"""
+    DEBUG / PRESENTATION ONLY.
 
+    This function is used only for visualization.
+    Sorting is intentionally used here for readability.
+    It is NOT part of the order book synchronization algorithm
+    and is not called in the hot data path.
+
+    In production, the order book would be stored
+    in a sorted data structure (e.g. tree / heap).
+    """
 def print_order_book(order_book: Dict[str, Dict[float, float]], top_n: int = 10) -> None:
     bids = sorted(order_book["bids"].items(), key=lambda x: x[0], reverse=True)[:top_n]
     asks = sorted(order_book["asks"].items(), key=lambda x: x[0])[:top_n]
