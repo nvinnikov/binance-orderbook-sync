@@ -4,10 +4,13 @@ on:
   workflow_dispatch:
     inputs:
       symbol:
-        description: 'Trading symbol (e.g., btcusdt, ethusdt)'
+        description: 'Trading symbol'
         required: false
         default: 'btcusdt'
-        type: string
+        type: choice
+        options:
+          - btcusdt
+          - ethusdt
 
 jobs:
   run-orderbook:
