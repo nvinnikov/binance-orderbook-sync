@@ -2,6 +2,12 @@ name: run-orderbook
 
 on:
   workflow_dispatch:
+    inputs:
+      symbol:
+        description: 'Trading symbol (e.g., btcusdt, ethusdt)'
+        required: false
+        default: 'btcusdt'
+        type: string
 
 jobs:
   run-orderbook:
@@ -23,6 +29,8 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run orderbook for 5 minutes
+        env:
+          SYMBOL: ${{ inputs.symbol }}
         run: |
           timeout 300s python main.py 2>&1 | tee orderbook.log
 
