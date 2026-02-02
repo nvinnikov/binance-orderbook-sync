@@ -2,6 +2,8 @@
 
 Синхронизация order book с Binance Futures через WebSocket с использованием REST snapshot для инициализации.
 
+action: [run-orderbook](https://github.com/<your-username>/<repo-name>/actions/workflows/run-orderbook.yml)
+
 ## Описание
 
 Скрипт подключается к WebSocket потоку Binance Futures для получения обновлений order book и синхронизирует их с локальным состоянием. Использует REST API snapshot для начальной инициализации и буферизацию событий для обеспечения консистентности данных.
