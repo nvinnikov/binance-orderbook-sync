@@ -34,19 +34,42 @@ BIDS (price, qty)                  | ASKS (price, qty)
 ## Установка
 
 ```bash
-pip install requests pydantic websockets
+pip install -r requirements.txt
 ```
 
 ## Использование
+
+### Базовый запуск (символ по умолчанию: `btcusdt`)
 
 ```bash
 python main.py
 ```
 
+### Запуск с указанием символа через переменную окружения
+
+```bash
+SYMBOL=ethusdt python main.py
+```
+
+### Запуск с указанием символа через аргумент командной строки
+
+```bash
+python main.py ethusdt
+```
+
+**Приоритет**: аргумент командной строки > переменная окружения > значение по умолчанию
+
 ## Настройка
 
-В файле `main.py` можно изменить:
+### Параметры командной строки и переменные окружения
+
 - `SYMBOL` - торговая пара (по умолчанию: `btcusdt`)
+  - Можно задать через переменную окружения: `SYMBOL=ethusdt python main.py`
+  - Или через аргумент: `python main.py ethusdt`
+
+### Параметры в коде (функция `handle_websocket`)
+
+В файле `main.py` можно изменить параметры функции `handle_websocket`:
 - `snapshot_limit` - лимит для snapshot (по умолчанию: 1000)
 - `prebuffer_count` - количество событий для предварительного буфера (по умолчанию: 50)
 - `print_every_sec` - интервал вывода order book в секундах (по умолчанию: 1.0)

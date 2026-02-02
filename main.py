@@ -11,10 +11,6 @@ from websockets.sync.client import connect
 #Env
 
 SYMBOL = os.getenv("SYMBOL", "btcusdt")
-# Поддержка аргумента командной строки (приоритет выше, чем env var)
-if len(sys.argv) > 1:
-    SYMBOL = sys.argv[1]
-
 REST_SNAPSHOT_URL = "https://fapi.binance.com/fapi/v1/depth"
 WS_URL = f"wss://fstream.binance.com/stream?streams={SYMBOL}@depth"
 
