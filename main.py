@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 import sys
 import time
@@ -6,6 +7,16 @@ from typing import Any, Dict, List
 import requests
 from pydantic import BaseModel, ValidationError
 from websockets.sync.client import connect
+
+from analytics.obi import compute_obi
+from analytics.whale import WhaleDetector
+from analytics.timeseries import TimeseriesRecorder
+
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 #Env
@@ -103,7 +114,12 @@ def extract_depth_payload(msg: Dict[str, Any]) -> Dict[str, Any]:
     In production, the order book would be stored
     in a sorted data structure (e.g. tree / heap).
     """
-def print_order_book(order_book: Dict[str, Dict[float, float]], top_n: int = 10) -> None:
+def print_order_book(
+    order_book: Dict[str, Dict[float, float]],
+    top_n: int = 10,
+    obi: float | None = None,
+    obi_alert_threshold: float = 0.7,
+) -> None:
     bids = sorted(order_book["bids"].items(), key=lambda x: x[0], reverse=True)[:top_n]
     asks = sorted(order_book["asks"].items(), key=lambda x: x[0])[:top_n]
 
@@ -111,8 +127,18 @@ def print_order_book(order_book: Dict[str, Dict[float, float]], top_n: int = 10)
     best_ask = asks[0][0] if asks else None
     spread = (best_ask - best_bid) if (best_bid is not None and best_ask is not None) else None
 
+    obi_str = f"obi={obi:+.3f}" if obi is not None else "obi=n/a"
+    alert_str = ""
+    if obi is not None and abs(obi) >= obi_alert_threshold:
+        direction = "LONG" if obi > 0 else "SHORT"
+        alert_str = f"  *** IMBALANCE {direction} ***"
+
     print("\n" + "=" * 72)
-    print(f"ORDER BOOK (top {top_n}) | best_bid={best_bid} best_ask={best_ask} spread={spread}")
+    print(
+        f"ORDER BOOK (top {top_n}) | "
+        f"best_bid={best_bid} best_ask={best_ask} spread={spread} "
+        f"{obi_str}{alert_str}"
+    )
     print("-" * 72)
     print(f"{'BIDS (price, qty)':<34} | {'ASKS (price, qty)':<34}")
     print("-" * 72)
@@ -218,116 +244,138 @@ def handle_websocket(
     prebuffer_count: int = 50,
     print_every_sec: float = 1.0,
     top_n: int = 10,
+    obi_n: int = 10,
+    obi_alert_threshold: float = 0.7,
+    whale_threshold: float = 10.0,
+    timeseries_interval_sec: float = 1.0,
+    db_path: str = "orderbook.db",
 ):
     print("Подключено к WebSocket...")
     with connect(ws_url) as ws:
-        # Буфер до snapshot
-        buffer: List[DepthUpdateData] = []
+        whale_detector = WhaleDetector(threshold=whale_threshold)
+        recorder = TimeseriesRecorder(db_path=db_path, interval_sec=timeseries_interval_sec)
+        try:
+            # Буфер до snapshot
+            buffer: List[DepthUpdateData] = []
 
-        while len(buffer) < prebuffer_count:
-            msg_data = json.loads(ws.recv())
-            payload = extract_depth_payload(msg_data)
+            while len(buffer) < prebuffer_count:
+                msg_data = json.loads(ws.recv())
+                payload = extract_depth_payload(msg_data)
 
-            if payload.get("e") != "depthUpdate":
-                continue
+                if payload.get("e") != "depthUpdate":
+                    continue
 
-            try:
-                buffer.append(DepthUpdateData(**payload))
-            except ValidationError as e:
-                print(f"DepthUpdate validation error: {e}")
+                try:
+                    buffer.append(DepthUpdateData(**payload))
+                except ValidationError as e:
+                    print(f"DepthUpdate validation error: {e}")
 
-        print(f"Буфер заполнен: {len(buffer)} событий, диапазон: [{buffer[0].U}, {buffer[-1].u}]")
+            print(f"Буфер заполнен: {len(buffer)} событий, диапазон: [{buffer[0].U}, {buffer[-1].u}]")
 
-        # Snapshot
-        print("Получаем snapshot...")
-        snapshot = get_snapshot(snapshot_url, symbol=symbol, size=snapshot_limit)
-        if snapshot is None:
-            print("Snapshot пуст")
-            return
-
-        snapshot_last_id = snapshot.lastUpdateId
-        print(f"Snapshot получен: lastUpdateId={snapshot_last_id}")
-
-        # Если snapshot впереди буфера — дочитываем WS, чтобы покрыть expected
-        if buffer[-1].u <= snapshot_last_id:
-            print("Snapshot впереди буфера")
-            try:
-                buffer = extend_buffer_until_expected(ws, buffer, snapshot_last_id, max_events=20000)
-            except Exception as e:
-                print(f"Не удалось дотянуть буфер до snapshot: {e}")
-                print("Нужно перезапустить процесс")
+            # Snapshot
+            print("Получаем snapshot...")
+            snapshot = get_snapshot(snapshot_url, symbol=symbol, size=snapshot_limit)
+            if snapshot is None:
+                print("Snapshot пуст")
                 return
 
-        # Находим стартовое событие
-        try:
-            buffer = check_buffer_with_snapshot(buffer, snapshot_last_id)
-        except Exception as e:
-            print(f"Не удалось совместить буфер со snapshot: {e}")
-            print("Нужно перезапустить процесс с самого начала")
-            return
+            snapshot_last_id = snapshot.lastUpdateId
+            print(f"Snapshot получен: lastUpdateId={snapshot_last_id}")
 
-        # Init book
-        order_book = init_order_book(snapshot)
-        lastUpdateId = snapshot_last_id
-        print(f"Локальный ордербук инициализирован. lastUpdateId={lastUpdateId}")
-        print(f"Применяем буфер: {len(buffer)} событий")
+            # Если snapshot впереди буфера — дочитываем WS, чтобы покрыть expected
+            if buffer[-1].u <= snapshot_last_id:
+                print("Snapshot впереди буфера")
+                try:
+                    buffer = extend_buffer_until_expected(ws, buffer, snapshot_last_id, max_events=20000)
+                except Exception as e:
+                    print(f"Не удалось дотянуть буфер до snapshot: {e}")
+                    print("Нужно перезапустить процесс")
+                    return
 
-        # Apply buffer: first without pu, then strict pu
-        try:
-            first_applied = False
-
-            for event in buffer:
-                if event.u <= lastUpdateId:
-                    continue
-
-                if not first_applied:
-                    expected = lastUpdateId + 1
-                    if not (event.U <= expected <= event.u):
-                        raise RuntimeError(
-                            f"First buffered event doesn't cover expected. "
-                            f"event.U={event.U}, event.u={event.u}, expected={expected}"
-                        )
-                    lastUpdateId = apply_depth_update(order_book, event, lastUpdateId, require_pu=False)
-                    first_applied = True
-                    continue
-
-                lastUpdateId = apply_depth_update(order_book, event, lastUpdateId, require_pu=True)
-
-        except Exception as e:
-            print(f"Ошибка применения буфера: {e}")
-            print("Нужно очистить стакан и начать сначала")
-            return
-
-        print(f"Sync complete. lastUpdateId={lastUpdateId}")
-
-        print_order_book(order_book, top_n=top_n)
-
-        last_print_ts = time.time()
-
-        while True:
-            msg_data = json.loads(ws.recv())
-            payload = extract_depth_payload(msg_data)
-
-            if payload.get("e") != "depthUpdate":
-                continue
-
+            # Находим стартовое событие
             try:
-                event = DepthUpdateData(**payload)
-            except ValidationError as e:
-                print(f"DepthUpdate error: {e}")
-                continue
-
-            try:
-                lastUpdateId = apply_depth_update(order_book, event, lastUpdateId, require_pu=True)
+                buffer = check_buffer_with_snapshot(buffer, snapshot_last_id)
             except Exception as e:
-                print(f"Stream failed: {e}")
+                print(f"Не удалось совместить буфер со snapshot: {e}")
+                print("Нужно перезапустить процесс с самого начала")
+                return
+
+            # Init book
+            order_book = init_order_book(snapshot)
+            lastUpdateId = snapshot_last_id
+            print(f"Локальный ордербук инициализирован. lastUpdateId={lastUpdateId}")
+            print(f"Применяем буфер: {len(buffer)} событий")
+
+            # Apply buffer: first without pu, then strict pu
+            try:
+                first_applied = False
+
+                for event in buffer:
+                    if event.u <= lastUpdateId:
+                        continue
+
+                    if not first_applied:
+                        expected = lastUpdateId + 1
+                        if not (event.U <= expected <= event.u):
+                            raise RuntimeError(
+                                f"First buffered event doesn't cover expected. "
+                                f"event.U={event.U}, event.u={event.u}, expected={expected}"
+                            )
+                        lastUpdateId = apply_depth_update(order_book, event, lastUpdateId, require_pu=False)
+                        first_applied = True
+                        continue
+
+                    lastUpdateId = apply_depth_update(order_book, event, lastUpdateId, require_pu=True)
+
+            except Exception as e:
+                print(f"Ошибка применения буфера: {e}")
                 print("Нужно очистить стакан и начать сначала")
                 return
 
-            now = time.time()
-            if now - last_print_ts >= print_every_sec:
-                print_order_book(order_book, top_n=top_n)
-                last_print_ts = now
+            print(f"Sync complete. lastUpdateId={lastUpdateId}")
+
+            obi = compute_obi(order_book, n=obi_n)
+            print_order_book(order_book, top_n=top_n, obi=obi, obi_alert_threshold=obi_alert_threshold)
+
+            last_print_ts = time.time()
+
+            while True:
+                msg_data = json.loads(ws.recv())
+                payload = extract_depth_payload(msg_data)
+
+                if payload.get("e") != "depthUpdate":
+                    continue
+
+                try:
+                    event = DepthUpdateData(**payload)
+                except ValidationError as e:
+                    print(f"DepthUpdate error: {e}")
+                    continue
+
+                try:
+                    lastUpdateId = apply_depth_update(order_book, event, lastUpdateId, require_pu=True)
+                except Exception as e:
+                    print(f"Stream failed: {e}")
+                    print("Нужно очистить стакан и начать сначала")
+                    return
+
+                now = time.time()
+                if now - last_print_ts >= print_every_sec:
+                    obi = compute_obi(order_book, n=obi_n)
+
+                    bids_sorted = sorted(order_book["bids"].items(), key=lambda x: x[0], reverse=True)
+                    asks_sorted = sorted(order_book["asks"].items(), key=lambda x: x[0])
+                    best_bid = bids_sorted[0][0] if bids_sorted else None
+                    best_ask = asks_sorted[0][0] if asks_sorted else None
+                    mid_price = (best_bid + best_ask) / 2 if (best_bid and best_ask) else 0.0
+
+                    whale_detector.scan(order_book, mid_price=mid_price)
+                    recorder.record(order_book, obi=obi)
+                    print_order_book(order_book, top_n=top_n, obi=obi, obi_alert_threshold=obi_alert_threshold)
+                    last_print_ts = now
+
+        finally:
+            recorder.close()
 
 
 # Run
@@ -341,4 +389,9 @@ if __name__ == "__main__":
         prebuffer_count=50,
         print_every_sec=1.0,
         top_n=10,
+        obi_n=10,
+        obi_alert_threshold=0.7,
+        whale_threshold=10.0,
+        timeseries_interval_sec=1.0,
+        db_path="orderbook.db",
     )
