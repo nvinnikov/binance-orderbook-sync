@@ -62,7 +62,11 @@ def plot(db_path: str, last_n: int | None = None) -> None:
     ax1.legend(loc="upper left", fontsize=8)
 
     ax1r = ax1.twinx()
-    ax1r.fill_between(data["dt"], data["spread"], alpha=0.3, color="orange", label="Spread")
+    ax1r.plot(data["dt"], data["spread"], color="orange", linewidth=1, label="Spread")
+    spread_vals = [v for v in data["spread"] if v is not None]
+    if spread_vals:
+        margin = max(max(spread_vals) * 0.5, 0.01)
+        ax1r.set_ylim(min(spread_vals) - margin, max(spread_vals) + margin)
     ax1r.set_ylabel("Spread")
     ax1r.legend(loc="upper right", fontsize=8)
 
