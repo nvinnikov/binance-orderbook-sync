@@ -14,7 +14,7 @@ def compute_obi(order_book: Dict[str, Dict[float, float]], n: int = 10) -> float
     ask_sum = sum(q for _, q in asks)
     total = bid_sum + ask_sum
 
-    if total == 0.0:
+    if total <= 0.0:
         return 0.0
 
     return (bid_sum - ask_sum) / total
